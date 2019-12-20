@@ -10,6 +10,7 @@ import (
 	"os"
 	"net/http"
 	"time"
+	"HFish/utils/cache"
 	"HFish/utils/conf"
 	"HFish/core/protocol/ssh"
 	"HFish/core/protocol/redis"
@@ -21,6 +22,14 @@ import (
 	"HFish/view/api"
 	"HFish/utils/cors"
 	"HFish/core/protocol/memcache"
+	"HFish/core/protocol/tftp"
+	"HFish/core/protocol/httpx"
+	"HFish/core/protocol/elasticsearch"
+	"HFish/core/protocol/vnc"
+	"HFish/core/dbUtil"
+	"strconv"
+	"github.com/gin-contrib/sessions"
+	"github.com/gin-contrib/sessions/cookie"
 )
 
 func RunWeb(template string, index string, static string, url string) http.Handler {
@@ -120,6 +129,9 @@ func RunAdmin() http.Handler {
 		)
 	}))
 
+	store := cookie.NewStore([]byte("HFish"))
+	r.Use(sessions.Sessions("HFish", store))
+
 	r.Use(gin.Recovery())
 
 	// 引入html资源
@@ -134,15 +146,63 @@ func RunAdmin() http.Handler {
 	return r
 }
 
+// 初始化缓存
+func initCahe() {
+	resultMail, _ := dbUtil.DB().Table("hfish_setting").Fields("status", "info").Where("type", "=", "alertMail").First()
+	resultHook, _ := dbUtil.DB().Table("hfish_setting").Fields("status", "info").Where("type", "=", "webHook").First()
+	resultIp, _ := dbUtil.DB().Table("hfish_setting").Fields("status", "info").Where("type", "=", "whiteIp").First()
+
+	cache.Setx("MailConfigStatus", strconv.FormatInt(resultMail["status"].(int64), 10))
+	cache.Setx("MailConfigInfo", resultMail["info"])
+
+	cache.Setx("HookConfigStatus", strconv.FormatInt(resultHook["status"].(int64), 10))
+	cache.Setx("HookConfigInfo", resultHook["info"])
+
+	cache.Setx("IpConfigStatus", strconv.FormatInt(resultIp["status"].(int64), 10))
+	cache.Setx("IpConfigInfo", resultIp["info"])
+}
+
 func Run() {
+	// 启动 vnc  蜜罐
+	vncStatus := conf.Get("vnc", "status")
+
+	// 判断 vnc 蜜罐 是否开启
+	if vncStatus == "1" {
+		vncAddr := conf.Get("vnc", "addr")
+		go vnc.Start(vncAddr)
+	}
+
+	//=========================//
+
+	// 启动 elasticsearch 蜜罐
+	esStatus := conf.Get("elasticsearch", "status")
+
+	// 判断 elasticsearch 蜜罐 是否开启
+	if esStatus == "1" {
+		esAddr := conf.Get("elasticsearch", "addr")
+		go elasticsearch.Start(esAddr)
+	}
+
+	//=========================//
+
+	// 启动 TFTP 蜜罐
+	tftpStatus := conf.Get("tftp", "status")
+
+	// 判断 TFTP 蜜罐 是否开启
+	if tftpStatus == "1" {
+		tftpAddr := conf.Get("tftp", "addr")
+		go tftp.Start(tftpAddr)
+	}
+
+	//=========================//
+
 	// 启动 MemCache 蜜罐
 	memCacheStatus := conf.Get("mem_cache", "status")
 
 	// 判断 MemCache 蜜罐 是否开启
 	if memCacheStatus == "1" {
 		memCacheAddr := conf.Get("mem_cache", "addr")
-		memCacheRateLimit := conf.Get("mem_cache", "rate_limit")
-		go memcache.Start(memCacheAddr, memCacheRateLimit)
+		go memcache.Start(memCacheAddr, "4")
 	}
 
 	//=========================//
@@ -169,14 +229,14 @@ func Run() {
 
 	//=========================//
 
-	//// 启动 HTTP 正向代理
-	//httpStatus := conf.Get("http", "status")
-	//
-	//// 判断 HTTP 正向代理 是否开启
-	//if httpStatus == "1" {
-	//	httpAddr := conf.Get("http", "addr")
-	//	go httpx.Start(httpAddr)
-	//}
+	// 启动 HTTP 正向代理
+	httpStatus := conf.Get("http", "status")
+
+	// 判断 HTTP 正向代理 是否开启
+	if httpStatus == "1" {
+		httpAddr := conf.Get("http", "addr")
+		go httpx.Start(httpAddr)
+	}
 
 	//=========================//
 
@@ -298,13 +358,15 @@ func Run() {
 
 		for {
 			// 这样写 提高IO读写性能
-			go client.Start(rpcName, ftpStatus, telnetStatus, "0", mysqlStatus, redisStatus, sshStatus, webStatus, deepStatus, memCacheStatus, plugStatus)
+			go client.Start(rpcName, ftpStatus, telnetStatus, httpStatus, mysqlStatus, redisStatus, sshStatus, webStatus, deepStatus, memCacheStatus, plugStatus, esStatus, tftpStatus, vncStatus)
 
 			time.Sleep(time.Duration(1) * time.Minute)
 		}
 	}
 
 	//=========================//
+	// 初始化缓存
+	initCahe()
 
 	// 启动 admin 管理后台
 	adminAddr := conf.Get("admin", "addr")
@@ -335,7 +397,7 @@ func Help() {
  {K ||       __ _______     __
   | PP      / // / __(_)__ / /
   | ||     / _  / _// (_-</ _ \
-  (__\\   /_//_/_/ /_/___/_//_/ v0.3.2
+  (__\\   /_//_/_/ /_/___/_//_/ v0.5
 `
 	fmt.Println(color.Yellow(logo))
 	fmt.Println(color.White(" A Safe and Active Attack Honeypot Fishing Framework System for Enterprises."))
